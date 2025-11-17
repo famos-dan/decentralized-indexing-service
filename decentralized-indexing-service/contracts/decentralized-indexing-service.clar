@@ -104,3 +104,107 @@
     (ok true)
 )
 )
+
+;; Challenge Mechanism
+(define-public (challenge-node 
+  (challenged-node principal)
+  (challenge-type uint)
+  (evidence-hash (string-ascii 64))
+)
+  (let (
+    (challenger tx-sender)
+    (challenge-stake (/ (stx-get-balance challenger) u10)) ;; 10% of balance
+    (node-info (unwrap! (map-get? IndexingNodes { node-address: challenged-node }) ERR_INVALID_NODE))
+  )
+    ;; Prevent duplicate challenges
+    (asserts! (is-none (map-get? NodeChallenges 
+      { 
+        challenger: challenger, 
+        challenged-node: challenged-node,
+        challenge-block: stacks-block-height 
+      }
+    )) ERR_CHALLENGE_EXISTS)
+    
+    ;; Transfer challenge stake
+    (try! (stx-transfer? challenge-stake challenger (as-contract tx-sender)))
+    
+    ;; Record challenge
+    (map-set NodeChallenges
+      { 
+        challenger: challenger, 
+        challenged-node: challenged-node,
+        challenge-block: stacks-block-height 
+      }
+      {
+        challenge-stake: challenge-stake,
+        resolved: false,
+        challenge-type: challenge-type,
+        evidence-hash: evidence-hash
+      }
+    )
+    
+    (ok true)
+)
+)
+
+;; Resolve Challenge
+(define-public (resolve-challenge 
+  (challenger principal)
+  (challenged-node principal)
+  (challenge-block uint)
+  (is-valid bool)
+)
+  (let (
+    (challenge-info (unwrap! 
+      (map-get? NodeChallenges 
+        { 
+          challenger: challenger, 
+          challenged-node: challenged-node,
+          challenge-block: challenge-block 
+        }
+      ) 
+      ERR_INVALID_CHALLENGE
+    ))
+    (node-info (unwrap! (map-get? IndexingNodes { node-address: challenged-node }) ERR_INVALID_NODE))
+    (resolver tx-sender)
+  )
+    ;; Ensure challenge is not already resolved
+    (asserts! (not (get resolved challenge-info)) ERR_INVALID_CHALLENGE)
+    
+    ;; Ensure challenge is within resolution period
+    (asserts! (<= (- stacks-block-height challenge-block) CHALLENGE_PERIOD) ERR_INVALID_CHALLENGE)
+    
+    ;; Resolve challenge
+    (if is-valid
+      ;; Challenge proven - slash node
+      (begin
+        (map-set IndexingNodes 
+          { node-address: challenged-node }
+          (merge node-info {
+            reputation-score: (/ (get reputation-score node-info) u2), ;; Halve reputation
+            active: (if (< (get reputation-score node-info) u1000) false true)
+          })
+        )
+        ;; Reward challenger
+        (try! (as-contract (stx-transfer? (get challenge-stake challenge-info) tx-sender challenger)))
+      )
+      ;; Challenge invalid - punish challenger
+      (begin
+        ;; Slash challenger's stake
+        (try! (as-contract (stx-transfer? (get challenge-stake challenge-info) tx-sender challenged-node)))
+      )
+    )
+    
+    ;; Mark challenge as resolved
+    (map-set NodeChallenges
+      { 
+        challenger: challenger, 
+        challenged-node: challenged-node,
+        challenge-block: challenge-block 
+      }
+      (merge challenge-info { resolved: true })
+    )
+    
+    (ok true)
+)
+)
